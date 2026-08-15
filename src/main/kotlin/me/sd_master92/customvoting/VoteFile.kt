@@ -11,8 +11,11 @@ import me.sd_master92.customvoting.constants.interfaces.TopVoter
 import me.sd_master92.customvoting.constants.interfaces.Voter
 import me.sd_master92.customvoting.constants.models.VoteHistory
 import me.sd_master92.customvoting.constants.models.VoteSiteUUID
+import org.bukkit.configuration.file.YamlConfiguration
 import org.bukkit.entity.Player
+import java.io.File
 import java.util.*
+import java.util.concurrent.ConcurrentHashMap
 
 class VoteFile : Voter
 {
@@ -39,10 +42,45 @@ class VoteFile : Voter
 
     private suspend fun register()
     {
+        migrate()
         if (getVotes() == 0)
         {
             setVotes(0, false)
         }
+        syncSnapshot()
+    }
+
+    /**
+     * Previously applied to every player file eagerly at startup; now applied to each
+     * file the first time it is actually loaded.
+     */
+    private fun migrate()
+    {
+        playerFile.keyMigrations(KEY_MIGRATIONS)
+        if (playerFile.contains("last"))
+        {
+            playerFile.delete("last")
+        }
+    }
+
+    /**
+     * Writes this voter's current values into the lightweight snapshot registry that
+     * backs [getAll] and the top-voter list.
+     */
+    internal suspend fun syncSnapshot()
+    {
+        SNAPSHOTS[getUuid()] = VoterSnapshot(
+            plugin,
+            getUuid(),
+            getName(),
+            getVotes(),
+            getVotesMonthly(),
+            getVotesWeekly(),
+            getVotesDaily(),
+            getStreakDaily(),
+            getPower(),
+            getLast()
+        )
     }
 
     override suspend fun getUuid(): UUID
@@ -57,7 +95,9 @@ class VoteFile : Voter
 
     override suspend fun setName(name: String): Boolean
     {
-        return playerFile.setName(name)
+        val result = playerFile.setName(name)
+        syncSnapshot()
+        return result
     }
 
     override suspend fun setNameIfChanged(name: String): Boolean
@@ -125,7 +165,9 @@ class VoteFile : Voter
     override suspend fun setStreakDaily(n: Int): Boolean
     {
         playerFile.set(STREAK_DAILY, n)
-        return playerFile.saveConfig()
+        val result = playerFile.saveConfig()
+        syncSnapshot()
+        return result
     }
 
     suspend fun delete(): Boolean
@@ -133,6 +175,7 @@ class VoteFile : Voter
         if (playerFile.delete())
         {
             ALL.remove(getUuid())
+            SNAPSHOTS.remove(getUuid())
             Voter.getTopVoters(plugin, true)
             return true
         }
@@ -151,6 +194,7 @@ class VoteFile : Voter
             clearStreak()
         }
 
+        syncSnapshot()
         if (update)
         {
             Voter.getTopVoters(plugin, true)
@@ -160,16 +204,19 @@ class VoteFile : Voter
     override suspend fun clearMonthlyVotes()
     {
         playerFile.setNumber(VOTES_MONTHLY, 0)
+        syncSnapshot()
     }
 
     override suspend fun clearWeeklyVotes()
     {
         playerFile.setNumber(VOTES_WEEKLY, 0)
+        syncSnapshot()
     }
 
     override suspend fun clearDailyVotes()
     {
         playerFile.setNumber(VOTES_DAILY, 0)
+        syncSnapshot()
     }
 
     override suspend fun addVote(site: VoteSiteUUID, queued: Boolean): Boolean
@@ -182,6 +229,7 @@ class VoteFile : Voter
         playerFile.addNumber(VOTES_WEEKLY)
         playerFile.addNumber(VOTES_DAILY)
 
+        syncSnapshot()
         Voter.getTopVoters(plugin, true)
 
         return beforeVotes < getVotes()
@@ -190,7 +238,9 @@ class VoteFile : Voter
     override suspend fun setPower(power: Boolean): Boolean
     {
         playerFile.set(POWER, power)
-        return playerFile.saveConfig()
+        val result = playerFile.saveConfig()
+        syncSnapshot()
+        return result
     }
 
     override suspend fun addHistory(site: VoteSiteUUID, queued: Boolean): Boolean
@@ -199,7 +249,9 @@ class VoteFile : Voter
         playerFile.set(Data.VOTE_HISTORY.path + ".$key.site", site.toString())
         playerFile.setTimeStamp(Data.VOTE_HISTORY.path + ".$key.timestamp")
         playerFile.set(Data.VOTE_HISTORY.path + ".$key.queued", queued)
-        return playerFile.saveConfig()
+        val result = playerFile.saveConfig()
+        syncSnapshot()
+        return result
     }
 
     override suspend fun clearQueue(): Boolean
@@ -216,7 +268,9 @@ class VoteFile : Voter
         val diff = getLast().dayDifference()
         if (!plugin.config.getBoolean(Setting.VOTE_STREAK_CONSECUTIVE.path) || diff == 1 || getVotes() == 0)
         {
-            return playerFile.addNumber(STREAK_DAILY, 1)
+            val result = playerFile.addNumber(STREAK_DAILY, 1)
+            syncSnapshot()
+            return result
         } else if (diff > 1)
         {
             clearStreak()
@@ -226,7 +280,9 @@ class VoteFile : Voter
 
     override suspend fun clearStreak(): Boolean
     {
-        return playerFile.setNumber(STREAK_DAILY, 0)
+        val result = playerFile.setNumber(STREAK_DAILY, 0)
+        syncSnapshot()
+        return result
     }
 
     companion object : TopVoter
@@ -238,27 +294,83 @@ class VoteFile : Voter
         private const val STREAK_DAILY = "streak_daily"
         private const val POWER = "power"
 
-        private var ALL: MutableMap<UUID, VoteFile> = HashMap()
+        private var ALL: MutableMap<UUID, VoteFile> = ConcurrentHashMap()
+        private var SNAPSHOTS: MutableMap<UUID, VoterSnapshot> = ConcurrentHashMap()
+        private lateinit var pluginRef: CV
+
+        private val KEY_MIGRATIONS = mapOf(
+            Pair("period", "monthly_votes"),
+            Pair("monthly_votes", VOTES_MONTHLY),
+            Pair("opUser", POWER)
+        )
 
         suspend fun init(plugin: CV)
         {
-            PlayerFile.init(plugin)
-            ALL = withContext(Dispatchers.IO) {
-                PlayerFile.getAll().values.map { playerFile -> VoteFile(playerFile.uuid, plugin) }
-                    .associateBy { file -> file.getUuid() }.toMutableMap()
+            pluginRef = plugin
+            ALL = ConcurrentHashMap()
+            // Build lightweight snapshots by reading each player file once and letting go of
+            // the parsed YAML immediately. Full VoteFile/PlayerFile instances (which stay in
+            // memory) are only created on demand for players that are actually interacted with.
+            SNAPSHOTS = withContext(Dispatchers.IO) {
+                val snapshots = ConcurrentHashMap<UUID, VoterSnapshot>()
+                val files = File(plugin.dataFolder, "players").listFiles { file -> file.name.endsWith(".yml") }
+                for (file in files ?: emptyArray())
+                {
+                    val uuid = try
+                    {
+                        UUID.fromString(file.name.removeSuffix(".yml"))
+                    } catch (e: IllegalArgumentException)
+                    {
+                        continue
+                    }
+                    val config = YamlConfiguration.loadConfiguration(file)
+                    var last = 0L
+                    val history = config.getConfigurationSection(Data.VOTE_HISTORY.path)
+                    if (history != null)
+                    {
+                        for (key in history.getKeys(false))
+                        {
+                            last = maxOf(last, history.getLong("$key.timestamp"))
+                        }
+                    }
+                    // pre-migration keys are read here directly; the real migration happens
+                    // lazily when the file is first loaded as a VoteFile
+                    val monthly = when
+                    {
+                        config.contains(VOTES_MONTHLY) -> config.getInt(VOTES_MONTHLY)
+                        config.contains("monthly_votes") -> config.getInt("monthly_votes")
+                        else -> config.getInt("period")
+                    }
+                    snapshots[uuid] = VoterSnapshot(
+                        plugin,
+                        uuid,
+                        config.getString("name") ?: "unknown",
+                        config.getInt(VOTES),
+                        monthly,
+                        config.getInt(VOTES_WEEKLY),
+                        config.getInt(VOTES_DAILY),
+                        config.getInt(STREAK_DAILY),
+                        config.getBoolean(POWER) || config.getBoolean("opUser") || config.getBoolean("opuser"),
+                        last
+                    )
+                }
+                snapshots
             }
-            migrateAll()
         }
 
         suspend fun mergeDuplicates(): Int
         {
+            if (!::pluginRef.isInitialized)
+            {
+                return 0
+            }
             val voters = getAll()
             var deleted = 0
             for (voter in voters.filter { it ->
                 it.getUuid() !in voters.distinctBy { it.getName() }.map { it.getUuid() }
             })
             {
-                if (voter is VoteFile && voter.delete())
+                if (getByUuid(pluginRef, voter.getUuid()).delete())
                 {
                     deleted++
                 }
@@ -268,7 +380,17 @@ class VoteFile : Voter
 
         override fun getAll(): MutableList<Voter>
         {
-            return ALL.values.toMutableList()
+            return SNAPSHOTS.values.toMutableList()
+        }
+
+        /**
+         * Drops the cached VoteFile (and its underlying PlayerFile) for a player, e.g. when
+         * they leave the server. The lightweight snapshot stays.
+         */
+        fun unload(uuid: UUID)
+        {
+            ALL.remove(uuid)
+            PlayerFileCache.evict(uuid)
         }
 
         suspend fun get(plugin: CV, player: Player): VoteFile
@@ -304,29 +426,22 @@ class VoteFile : Voter
         private suspend fun getByName(plugin: CV, player: Player): VoteFile
         {
             val ignoreCase = plugin.config.getBoolean(Setting.IGNORE_PLAYERNAME_CASING.path)
-            var voter = ALL.values.firstOrNull { file -> file.getName().equals(player.name, ignoreCase) }
-            if (voter == null)
+            val loaded = ALL.values.firstOrNull { file -> file.getName().equals(player.name, ignoreCase) }
+            if (loaded != null)
             {
-                voter = VoteFile(player, plugin)
-                ALL[player.uniqueId] = voter
+                return loaded
             }
+            // resolve the uuid of an existing file through the snapshot registry instead of
+            // requiring every file to be loaded
+            val uuid = SNAPSHOTS.entries.firstOrNull { entry -> entry.value.name.equals(player.name, ignoreCase) }?.key
+            if (uuid != null)
+            {
+                return getByUuid(plugin, uuid, player.name)
+            }
+            val voter = VoteFile(player, plugin)
+            ALL[player.uniqueId] = voter
             return voter
         }
 
-        private fun migrateAll()
-        {
-            val keyMigrations = mapOf(
-                Pair("period", "monthly_votes"),
-                Pair("monthly_votes", VOTES_MONTHLY),
-                Pair("opUser", POWER)
-            )
-
-            for (playerFile in PlayerFile.getAll().values)
-            {
-                playerFile.keyMigrations(keyMigrations)
-
-                playerFile.delete("last")
-            }
-        }
     }
 }

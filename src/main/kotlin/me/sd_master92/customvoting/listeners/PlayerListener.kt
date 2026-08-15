@@ -10,6 +10,7 @@ import me.sd_master92.customvoting.constants.enumerations.Message
 import me.sd_master92.customvoting.constants.enumerations.PMessage
 import me.sd_master92.customvoting.constants.enumerations.Setting
 import me.sd_master92.customvoting.constants.enumerations.SoundType
+import me.sd_master92.customvoting.VoteFile
 import me.sd_master92.customvoting.constants.interfaces.Voter
 import me.sd_master92.customvoting.gui.items.VotePartyItem
 import me.sd_master92.customvoting.gui.pages.editors.VotePartyRewardItemsEditor
@@ -58,9 +59,9 @@ class PlayerListener(private val plugin: CV) : Listener
     }
 
     @EventHandler
-    @Suppress("UNUSED_PARAMETER")
     fun onPlayerLeave(event: PlayerQuitEvent)
     {
+        VoteFile.unload(event.player.uniqueId)
         TaskTimer.delay(plugin, 20)
         {
             VoteTopStand.updateAll(plugin)
