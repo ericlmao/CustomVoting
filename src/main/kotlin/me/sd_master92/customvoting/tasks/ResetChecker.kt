@@ -48,9 +48,7 @@ class ResetChecker(private val plugin: CV)
                 {
                     lastResetMonth = currentMonth
                     performActionForVoters { voter ->
-                        plugin.launch {
-                            voter.clearMonthlyVotes()
-                        }
+                        voter.clearMonthlyVotes()
                     }
                     plugin.errorLog("monthly votes reset, because a new month has started")
                 }
@@ -62,9 +60,7 @@ class ResetChecker(private val plugin: CV)
                 {
                     lastResetWeek = currentWeek
                     performActionForVoters { voter ->
-                        plugin.launch {
-                            voter.clearWeeklyVotes()
-                        }
+                        voter.clearWeeklyVotes()
                     }
                     plugin.errorLog("weekly votes reset, because a new week has started")
                 }
@@ -76,36 +72,35 @@ class ResetChecker(private val plugin: CV)
                 {
                     lastResetDay = currentDay
                     performActionForVoters { voter ->
-                        plugin.launch {
-                            voter.clearDailyVotes()
-                        }
+                        voter.clearDailyVotes()
                     }
                     plugin.errorLog("daily votes reset, because a new day has started")
                 }
 
                 performActionForVoters { voter ->
-                    plugin.launch {
-                        val lastVote = voter.getLast()
-                        if (voter.getVotesMonthly() > 0 && lastVote.monthDifference() > 0)
-                        {
-                            voter.clearMonthlyVotes()
-                        }
-                        if (voter.getVotesWeekly() > 0 && lastVote.weekDifference() > 0)
-                        {
-                            voter.clearWeeklyVotes()
-                        }
-                        if (voter.getVotesDaily() > 0 && lastVote.dayDifference() > 0)
-                        {
-                            voter.clearDailyVotes()
-                        }
+                    val lastVote = voter.getLast()
+                    if (voter.getVotesMonthly() > 0 && lastVote.monthDifference() > 0)
+                    {
+                        voter.clearMonthlyVotes()
+                    }
+                    if (voter.getVotesWeekly() > 0 && lastVote.weekDifference() > 0)
+                    {
+                        voter.clearWeeklyVotes()
+                    }
+                    if (voter.getVotesDaily() > 0 && lastVote.dayDifference() > 0)
+                    {
+                        voter.clearDailyVotes()
                     }
                 }
             }
         }.run()
     }
 
-    private suspend fun performActionForVoters(action: (Voter) -> Unit)
+    private suspend fun performActionForVoters(action: suspend (Voter) -> Unit)
     {
-        Voter.getTopVoters(plugin).forEach(action)
+        for (voter in Voter.getTopVoters(plugin))
+        {
+            action(voter)
+        }
     }
 }
