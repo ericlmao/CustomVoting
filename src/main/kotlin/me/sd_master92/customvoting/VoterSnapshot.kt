@@ -99,16 +99,28 @@ class VoterSnapshot(
 
     override suspend fun clearMonthlyVotes()
     {
+        if (votesMonthly == 0)
+        {
+            return
+        }
         file().clearMonthlyVotes()
     }
 
     override suspend fun clearWeeklyVotes()
     {
+        if (votesWeekly == 0)
+        {
+            return
+        }
         file().clearWeeklyVotes()
     }
 
     override suspend fun clearDailyVotes()
     {
+        if (votesDaily == 0)
+        {
+            return
+        }
         file().clearDailyVotes()
     }
 

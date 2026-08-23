@@ -1,7 +1,6 @@
 package me.sd_master92.customvoting
 
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withContext
 import me.sd_master92.core.file.PlayerFile
 import me.sd_master92.core.infoLog
@@ -26,26 +25,31 @@ class VoteFile : Voter
     {
         playerFile = PlayerFile.getByUuid(plugin, uuid, name)
         this.plugin = plugin
-        runBlocking {
-            register()
-        }
+        register()
     }
 
     private constructor(player: Player, plugin: CV)
     {
         playerFile = player.getPlayerFile(plugin)
         this.plugin = plugin
-        runBlocking {
-            register()
-        }
+        register()
     }
 
-    private suspend fun register()
+    /**
+     * Must not suspend or block on coroutines: constructing a VoteFile happens inside other
+     * coroutines (e.g. the reset task iterating every voter), and a runBlocking here would
+     * run those queued coroutines nested inside this one and recurse until the stack overflows.
+     */
+    private fun register()
     {
         migrate()
-        if (getVotes() == 0)
+        if (playerFile.getNumber(VOTES) == 0)
         {
-            setVotes(0, false)
+            playerFile.setNumber(VOTES, 0)
+            playerFile.setNumber(VOTES_MONTHLY, 0)
+            playerFile.setNumber(VOTES_WEEKLY, 0)
+            playerFile.setNumber(VOTES_DAILY, 0)
+            playerFile.setNumber(STREAK_DAILY, 0)
         }
         syncSnapshot()
     }
@@ -67,20 +71,30 @@ class VoteFile : Voter
      * Writes this voter's current values into the lightweight snapshot registry that
      * backs [getAll] and the top-voter list.
      */
-    internal suspend fun syncSnapshot()
+    internal fun syncSnapshot()
     {
-        SNAPSHOTS[getUuid()] = VoterSnapshot(
+        SNAPSHOTS[playerFile.uuid] = VoterSnapshot(
             plugin,
-            getUuid(),
-            getName(),
-            getVotes(),
-            getVotesMonthly(),
-            getVotesWeekly(),
-            getVotesDaily(),
-            getStreakDaily(),
-            getPower(),
-            getLast()
+            playerFile.uuid,
+            playerFile.name,
+            playerFile.getNumber(VOTES),
+            playerFile.getNumber(VOTES_MONTHLY),
+            playerFile.getNumber(VOTES_WEEKLY),
+            playerFile.getNumber(VOTES_DAILY),
+            playerFile.getNumber(STREAK_DAILY),
+            playerFile.getBoolean(POWER),
+            lastVoteTime()
         )
+    }
+
+    private fun lastVoteTime(): Long
+    {
+        var last = 0L
+        for (key in playerFile.getConfigurationSection(Data.VOTE_HISTORY.path)?.getKeys(false) ?: listOf())
+        {
+            last = maxOf(last, playerFile.getTimeStamp(Data.VOTE_HISTORY.path + ".$key.timestamp"))
+        }
+        return last
     }
 
     override suspend fun getUuid(): UUID
@@ -401,16 +415,14 @@ class VoteFile : Voter
             )
         }
 
-        private fun getByUuid(plugin: CV, player: Player): VoteFile
+        private suspend fun getByUuid(plugin: CV, player: Player): VoteFile
         {
             val voteFile = ALL.getOrElse(player.uniqueId) {
                 val voter = VoteFile(player, plugin)
                 ALL[player.uniqueId] = voter
                 return voter
             }
-            runBlocking {
-                voteFile.setNameIfChanged(player.name)
-            }
+            voteFile.setNameIfChanged(player.name)
             return voteFile
         }
 
